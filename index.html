@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>リアルタイム定規検出</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      text-align: center;
+      background-color: #121212;
+      color: #ffffff;
+      font-family: sans-serif;
+    }
+    #container {
+      position: relative;
+      display: inline-block;
+      width: 100%;
+      max-width: 500px;
+    }
+    video, canvas {
+      width: 100%;
+      height: auto;
+    }
+    canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    #status {
+      padding: 10px;
+      font-size: 14px;
+      color: #00ff00;
+      font-weight: bold;
+    }
+  </style>
+  <!-- 安定版CDN(cdnjs)に変更し、エラーハンドリングを追加 -->
+  <script async src="https://cdnjs.cloudflare.com/ajax/libs/opencv.js/4.7.0/opencv.js" 
+          onload="onOpenCvReady()" 
+          onerror="onOpenCvError()"></script>
+</head>
+<body>
+
+  <h2>Webカメラ 定規検出</h2>
+  <div id="status">OpenCV.js を読み込み中...（数十秒かかる場合があります）</div>
+
+  <div id="container">
+    <video id="webcam" autoplay playsinline muted></video>
+    <canvas id="canvasOutput"></canvas>
+  </div>
+
+  <script>
+    let video = document.getElementById('webcam');
+    let canvas = document.getElementById('canvasOutput');
+    let ctx = canvas.getContext('2d');
+    let statusText = document.getElementById('status');
+    let streaming = false;
+
+    // OpenCV.jsの読み込み失敗時
+    function onOpenCvError() {
+      statusText.innerText = "エラー: OpenCV.jsの読み込みに失敗しました。再読み込みしてください。";
+      statusText.style.color = "#ff3333";
+    }
+
+    // OpenCV.jsの準備完了時
+    function onOpenCvReady() {
+      statusText.innerText = "カメラを起動中...";
+      startCamera();
+    }
+
+    // リアカメラの起動
+    function startCamera() {
+      navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" },
+        audio: false
+      })
+      .then(function(stream) {
+        video.srcObject = stream;
+        video.play();
+      })
+      .catch(function(err) {
+        statusText.innerText = "カメラへのアクセスエラー: " + err.name + " (HTTPSで接続されているか確認してください)";
+        statusText.style.color = "#ff3333";
+      });
+
+      video.addEventListener('canplay', function() {
+        if (!streaming) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          streaming = true;
+          statusText.innerText = "検出中（定規をカメラにかざしてください）";
+          statusText.style.color = "#00ff00";
+          requestAnimationFrame(processVideo);
+        }
+      }, false);
+    }
+
+    // 毎フレームの画像処理（リアルタイム検出）
+    function processVideo() {
+      if (!streaming) return;
+
+      let src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+      let gray = new cv.Mat();
+      let blurred = new cv.Mat();
+      let edges = new cv.Mat();
+      let contours = new cv.MatVector();
+      let hierarchy = new cv.Mat();
+
+      ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
+      let imageData = ctx.getImageData(0, 0, video.videoWidth, video.videoHeight);
+      src.data.set(imageData.data);
+
+      // グレースケール化とノイズ除去
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
+      cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
+
+      // エッジ検出
+      cv.Canny(blurred, edges, 50, 150);
+
+      // 輪郭検出
+      cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+      // 輪郭の判定
+      for (let i = 0; i < contours.size(); ++i) {
+        let cnt = contours.get(i);
+        let peri = cv.arcLength(cnt, true);
+        let approx = new cv.Mat();
+        
+        cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+
+        // 頂点が4つ（長方形）かつ一定面積以上
+        if (approx.rows === 4) {
+          let area = cv.contourArea(cnt);
+          if (area > 3000) {
+            let rect = cv.boundingRect(approx);
+            let maxSide = Math.max(rect.width, rect.height);
+            let minSide = Math.min(rect.width, rect.height);
+            let aspectRatio = maxSide / minSide;
+
+            // 縦横比が 2.5 以上（細長い四角形）を定規と判定
+            if (aspectRatio > 2.5) {
+              let contoursColor = new cv.Scalar(0, 255, 0, 255);
+              let polyVector = new cv.MatVector();
+              polyVector.push_back(approx);
+              cv.drawContours(src, polyVector, -1, contoursColor, 4);
+              polyVector.delete();
+            }
+          }
+        }
+        approx.delete();
+      }
+
+      cv.imshow('canvasOutput', src);
+
+      // メモリ解放
+      src.delete(); gray.delete(); blurred.delete();
+      edges.delete(); contours.delete(); hierarchy.delete();
+
+      requestAnimationFrame(processVideo);
+    }
+  </script>
+
+</body>
+</html>
