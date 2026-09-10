@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>リアルタイム カメムシ検出</title>
+
+    <style>
+        video, canvas {
+            width: 640px;
+            max-width: 100%;
+        }
+
+        #status {
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body>
+
+<h1>リアルタイム カメムシ検出</h1>
+
+<p id="status">OpenCV読み込み中...</p>
+
+<video id="video" autoplay playsinline></video>
+<canvas id="canvas"></canvas>
+
+
+<script>
+    var Module = {
+        onRuntimeInitialized: function() {
+            console.log("OpenCV.js 読み込み成功！");
+            console.log("typeof cv =", typeof cv);
+            console.log("typeof cv.Mat =", typeof cv.Mat);
+            console.log("typeof cv.findContours =", typeof cv.findContours);
+
+            document.getElementById("status").textContent =
+                "OpenCV読み込み成功！カメラを起動します。";
+
+            startCamera();
+        }
+    };
+</script>
+
+<!-- ローカルに置いたOpenCV.js -->
+<script src="./opencv.js"></script>
+
+
+<script>
+
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+
+// カメラを起動
+async function startCamera() {
+
+    try {
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                facingMode: "environment"
+            },
+            audio: false
+        });
+
+        video.srcObject = stream;
+
+        video.onloadedmetadata = function() {
+
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+
+            document.getElementById("status").textContent =
+                "カメラ起動成功！カメムシを探しています。";
+
+            detect();
+
+        };
+
+    } catch (error) {
+
+        console.error(error);
+
+        document.getElementById("status").textContent =
+            "カメラを起動できませんでした。";
+
+    }
+}
+
+
+// カメムシ検出
+function detect() {
+
+    ctx.drawImage(
+        video,
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    );
+
+    // Canvasから画像を取得
+    let src = cv.imread(canvas);
+
+    // HSVに変換
+    let hsv = new cv.Mat();
+
+    cv.cvtColor(
+        src,
+        hsv,
+        cv.COLOR_RGBA2HSV
+    );
+
+
+    // 茶色っぽい色を抽出
+    let lower = new cv.Mat(
+        hsv.rows,
+        hsv.cols,
+        hsv.type(),
+        [5, 40, 30, 0]
+    );
+
+    let upper = new cv.Mat(
+        hsv.rows,
+        hsv.cols,
+        hsv.type(),
+        [30, 255, 230, 0]
+    );
+
+    let mask = new cv.Mat();
+
+    cv.inRange(
+        hsv,
+        lower,
+        upper,
+        mask
+    );
+
+
+    // ノイズを減らす
+    let kernel = cv.Mat.ones(
+        5,
+        5,
+        cv.CV_8U
+    );
+
+    cv.morphologyEx(
+        mask,
+        mask,
+        cv.MORPH_OPEN,
+        kernel
+    );
+
+    cv.morphologyEx(
+        mask,
+        mask,
+        cv.MORPH_CLOSE,
+        kernel
+    );
+
+
+    // 輪郭を探す
+    let contours = new cv.MatVector();
+    let hierarchy = new cv.Mat();
+
+    cv.findContours(
+        mask,
+        contours,
+        hierarchy,
+        cv.RETR_EXTERNAL,
+        cv.CHAIN_APPROX_SIMPLE
+    );
+
+
+    // 元画像に検出結果を表示
+    for (let i = 0; i < contours.size(); i++) {
+
+        let contour = contours.get(i);
+
+        let area = cv.contourArea(contour);
+
+        // 小さすぎるものは無視
+        if (area < 2000) {
+            contour.delete();
+            continue;
+        }
+
+
+        // 外接する長方形
+        let rect = cv.boundingRect(contour);
+
+        let width = rect.width;
+        let height = rect.height;
+
+        let aspectRatio = height / width;
+
+
+        // 周囲の長さ
+        let perimeter =
+            cv.arcLength(contour, true);
+
+
+        // 円形度
+        let circularity = 0;
+
+        if (perimeter > 0) {
+            circularity =
+                4 * Math.PI * area /
+                (perimeter * perimeter);
+        }
+
+
+        /*
+            カメムシっぽい形か判定
+
+            縦長
+            ↓
+            height / width > 1.2
+
+            極端に細長いものは除外
+            ↓
+            height / width < 3.5
+
+            円形すぎるものを除外
+        */
+
+        if (
+            aspectRatio > 1.2 &&
+            aspectRatio < 3.5 &&
+            circularity > 0.15 &&
+            circularity < 0.8
+        ) {
+
+            // 緑色の輪郭を表示
+            let color =
+                new cv.Scalar(0, 255, 0, 255);
+
+            cv.drawContours(
+                src,
+                contours,
+                i,
+                color,
+                3
+            );
+
+
+            // 枠
+            cv.rectangle(
+                src,
+                new cv.Point(
+                    rect.x,
+                    rect.y
+                ),
+                new cv.Point(
+                    rect.x + rect.width,
+                    rect.y + rect.height
+                ),
+                color,
+                2
+            );
+
+
+            // 文字
+            cv.putText(
+                src,
+                "KAMEMUSHI?",
+                new cv.Point(
+                    rect.x,
+                    rect.y - 10
+                ),
+                cv.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                color,
+                2
+            );
+
+        }
+
+        contour.delete();
+    }
+
+
+    // Canvasに結果を表示
+    cv.imshow(
+        canvas,
+        src
+    );
+
+
+    // メモリ解放
+    src.delete();
+    hsv.delete();
+    lower.delete();
+    upper.delete();
+    mask.delete();
+    kernel.delete();
+    contours.delete();
+    hierarchy.delete();
+
+
+    // 次のフレーム
+    requestAnimationFrame(detect);
+}
+
+</script>
+
+</body>
+</html>
