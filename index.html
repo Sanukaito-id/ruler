@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>リアルタイム カメムシ検出</title>
+
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      text-align: center;
+      background-color: #121212;
+      color: #ffffff;
+      font-family: sans-serif;
+    }
+
+    #container {
+      position: relative;
+      display: inline-block;
+      width: 100%;
+      max-width: 500px;
+    }
+
+    video, canvas {
+      width: 100%;
+      height: auto;
+    }
+
+    canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+
+    #status {
+      padding: 10px;
+      font-size: 14px;
+      color: #00ff00;
+      font-weight: bold;
+    }
+  </style>
+</head>
+
+<body>
+
+  <h2>Webカメラ カメムシ検出</h2>
+
+  <div id="status">
+    OpenCV.js を準備中...（少しお待ちください）
+  </div>
+
+  <div id="container">
+    <video id="webcam" autoplay playsinline muted></video>
+    <canvas id="canvasOutput"></canvas>
+  </div>
+
+
+  <script>
+
+    let video = document.getElementById("webcam");
+    let canvas = document.getElementById("canvasOutput");
+    let ctx = canvas.getContext("2d");
+
+    let statusText = document.getElementById("status");
+
+    let streaming = false;
+
+
+    // OpenCVの準備
+    var Module = {
+
+      onRuntimeInitialized: function() {
+
+        statusText.innerText =
+          "OpenCV準備完了。カメラを起動します...";
+
+        startCamera();
+      }
+    };
+
+
+    // カメラを起動
+    function startCamera() {
+
+      navigator.mediaDevices.getUserMedia({
+
+        video: {
+          facingMode: "environment"
+        },
+
+        audio: false
+
+      })
+
+      .then(function(stream) {
+
+        video.srcObject = stream;
+
+        video.play();
+
+      })
+
+      .catch(function(err) {
+
+        statusText.innerText =
+          "カメラエラー: " + err.name;
+
+        statusText.style.color = "#ff3333";
+
+      });
+
+
+      video.addEventListener("canplay", function() {
+
+        if (!streaming) {
+
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+
+          streaming = true;
+
+          statusText.innerText =
+            "検出中（カメムシをカメラにかざしてください）";
+
+          statusText.style.color = "#00ff00";
+
+          requestAnimationFrame(processVideo);
+        }
+
+      }, false);
+    }
+
+
+
+    // 毎フレーム処理
+    function processVideo() {
+
+      if (!streaming) return;
+
+
+      if (typeof cv === "undefined" || !cv.Mat) {
+
+        requestAnimationFrame(processVideo);
+
+        return;
+      }
+
+
+      // --------------------------------
+      // 画像をOpenCVに取り込む
+      // --------------------------------
+
+      let src = new cv.Mat(
+        video.videoHeight,
+        video.videoWidth,
+        cv.CV_8UC4
+      );
+
+      let hsv = new cv.Mat();
+      let mask = new cv.Mat();
+      let blurred = new cv.Mat();
+
+      let contours = new cv.MatVector();
+      let hierarchy = new cv.Mat();
+
+
+      ctx.drawImage(
+        video,
+        0,
+        0,
+        video.videoWidth,
+        video.videoHeight
+      );
+
+
+      let imageData = ctx.getImageData(
+        0,
+        0,
+        video.videoWidth,
+        video.videoHeight
+      );
+
+
+      src.data.set(imageData.data);
+
+
+
+      // --------------------------------
+      // HSV色空間に変換
+      // --------------------------------
+
+      cv.cvtColor(
+        src,
+        hsv,
+        cv.COLOR_RGBA2RGB
+      );
+
+      cv.cvtColor(
+        hsv,
+        hsv,
+        cv.COLOR_RGB2HSV
+      );
+
+
+
+      // --------------------------------
+      // 茶色っぽい色を抽出
+      // --------------------------------
+
+      let lower = new cv.Mat(
+        hsv.rows,
+        hsv.cols,
+        hsv.type(),
+        [5, 40, 30, 0]
+      );
+
+      let upper = new cv.Mat(
+        hsv.rows,
+        hsv.cols,
+        hsv.type(),
+        [30, 255, 230, 0]
+      );
+
+
+      cv.inRange(
+        hsv,
+        lower,
+        upper,
+        mask
+      );
+
+
+      lower.delete();
+      upper.delete();
+
+
+
+      // --------------------------------
+      // ノイズを減らす
+      // --------------------------------
+
+      let kernel = cv.Mat.ones(
+        5,
+        5,
+        cv.CV_8U
+      );
+
+      cv.morphologyEx(
+        mask,
+        mask,
+        cv.MORPH_OPEN,
+        kernel
+      );
+
+      cv.morphologyEx(
+        mask,
+        mask,
+        cv.MORPH_CLOSE,
+        kernel
+      );
+
+      kernel.delete();
+
+
+
+      // --------------------------------
+      // 輪郭を探す
+      // --------------------------------
+
+      cv.findContours(
+        mask,
+        contours,
+        hierarchy,
+        cv.RETR_EXTERNAL,
+        cv.CHAIN_APPROX_SIMPLE
+      );
+
+
+
+      // --------------------------------
+      // カメムシ候補を判定
+      // --------------------------------
+
+      for (
+        let i = 0;
+        i < contours.size();
+        i++
+      ) {
+
+        let cnt = contours.get(i);
+
+        let area = cv.contourArea(cnt);
+
+
+        // 小さすぎるものは無視
+        if (area < 2000) {
+
+          cnt.delete();
+
+          continue;
+        }
+
+
+        // 外接長方形
+        let rect = cv.boundingRect(cnt);
+
+        let width = rect.width;
+        let height = rect.height;
+
+
+        // 縦横比
+        let aspectRatio =
+          height / width;
+
+
+        // 周囲長
+        let perimeter =
+          cv.arcLength(cnt, true);
+
+
+        // 円形度
+        let circularity =
+          (4 * Math.PI * area) /
+          (perimeter * perimeter);
+
+
+
+        // --------------------------------
+        // カメムシらしい条件
+        // --------------------------------
+
+        if (
+
+          // 縦長
+          aspectRatio > 1.2 &&
+
+          // 細長すぎない
+          aspectRatio < 3.5 &&
+
+          // 円形すぎない
+          circularity > 0.15 &&
+
+          circularity < 0.8
+
+        ) {
+
+
+          // --------------------------------
+          // 緑色の輪郭を描く
+          // --------------------------------
+
+          let color =
+            new cv.Scalar(
+              0,
+              255,
+              0,
+              255
+            );
+
+
+          let polyVector =
+            new cv.MatVector();
+
+          polyVector.push_back(cnt);
+
+
+          cv.drawContours(
+            src,
+            polyVector,
+            -1,
+            color,
+            4
+          );
+
+
+          polyVector.delete();
+
+
+
+          // --------------------------------
+          // 「カメムシ？」と表示
+          // --------------------------------
+
+          cv.putText(
+
+            src,
+
+            "KAMEMUSHI?",
+
+            new cv.Point(
+              rect.x,
+              Math.max(rect.y - 10, 20)
+            ),
+
+            cv.FONT_HERSHEY_SIMPLEX,
+
+            0.8,
+
+            new cv.Scalar(
+              0,
+              255,
+              0,
+              255
+            ),
+
+            2
+
+          );
+
+
+          // --------------------------------
+          // 検出情報
+          // --------------------------------
+
+          cv.putText(
+
+            src,
+
+            "Area: " +
+            Math.round(area),
+
+            new cv.Point(
+              rect.x,
+              rect.y + rect.height + 25
+            ),
+
+            cv.FONT_HERSHEY_SIMPLEX,
+
+            0.6,
+
+            new cv.Scalar(
+              0,
+              255,
+              0,
+              255
+            ),
+
+            2
+          );
+
+        }
+
+
+        cnt.delete();
+
+      }
+
+
+
+      // --------------------------------
+      // 結果を表示
+      // --------------------------------
+
+      cv.imshow(
+        "canvasOutput",
+        src
+      );
+
+
+
+      // --------------------------------
+      // メモリ解放
+      // --------------------------------
+
+      src.delete();
+      hsv.delete();
+      mask.delete();
+      blurred.delete();
+
+      contours.delete();
+      hierarchy.delete();
+
+
+
+      // 次のフレーム
+      requestAnimationFrame(
+        processVideo
+      );
+
+    }
+
+  </script>
+
+
+  <!-- OpenCV.js -->
+
+  <script
+    src="https://docs.opencv.org/4.5.4/opencv.js">
+  </script>
+
+</body>
+</html>
